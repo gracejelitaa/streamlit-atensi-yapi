@@ -1,7 +1,6 @@
-import io
 import pandas as pd
 import streamlit as st
-from utils import get_id_series
+from utils import get_id_series, generate_pdf_report
 from config import card_html, PALETTE
 
 def show(artifacts):
@@ -36,7 +35,7 @@ def show(artifacts):
     # =====================================================================
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown(card_html("Total Baris Terekspor", f"{df_final.shape[0]} Baris", "Siap Unduh (.CSV)", icon="📊"), unsafe_allow_html=True)
+        st.markdown(card_html("Total Baris Terekspor", f"{df_final.shape[0]} Baris", "Siap Diunduh (.PDF)", icon="📊"), unsafe_allow_html=True)
     with c2:
         st.markdown(card_html("Metode Evaluasi", "Silhouette Coefficient", "K-Means vs K-Medoids", icon="📐"), unsafe_allow_html=True)
     st.write("")
@@ -75,29 +74,26 @@ def show(artifacts):
     st.write("")
 
     # =====================================================================
-    # 4. DOWNLOAD DATASET BUTTON LAYER
+    # 4. DOWNLOAD LAPORAN PDF — ringkas, untuk mitra/pihak non-teknis
     # =====================================================================
     st.markdown(
         f"""
         <div class="ci-card" style="margin-bottom: 0;">
-            <h4 style="margin-top:0; color:{PALETTE['primary_dark']};">Unduh Berkas Hasil Penelitian</h4>
+            <h4 style="margin-top:0; color:{PALETTE['primary_dark']};">Unduh Laporan Hasil (PDF)</h4>
             <p style="font-size:0.85rem; color:{PALETTE['muted']}; margin-bottom: 1.2rem;">
-                Ekspor tabel komparasi di atas ke dalam format berkas Comma-Separated Values (.CSV) untuk kebutuhan lampiran draf laporan skripsi atau analisis lanjutan.
+                Unduh laporan ringkas hasil pengelompokan dalam format PDF.
             </p>
         </div>
         """, unsafe_allow_html=True
     )
 
-    # Menyiapkan bytes data eksport
-    csv_bytes = df_report_view.to_csv(index=False).encode("utf-8")
-
-    # Tombol download bawaan Streamlit yang secara otomatis mewarisi style CSS tombol utama kita
+    pdf_bytes = generate_pdf_report(df_report_view, artifacts, filter_opsi)
     st.download_button(
-        label="Unduh Lembar Hasil Analisis (.CSV)",
-        data=csv_bytes,
-        file_name="hasil_komparasi_clustering_atensi_yapi.csv",
-        mime="text/csv",
-        use_container_width=True
+        label="🖨️ Unduh Laporan Hasil (.PDF)",
+        data=pdf_bytes,
+        file_name="laporan_hasil_clustering_atensi_yapi.pdf",
+        mime="application/pdf",
+        use_container_width=True,
     )
 
     st.write("")

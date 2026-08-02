@@ -446,3 +446,139 @@ def show_model_visual(artifacts, image_key, caption, interactive_fig_fn):
     st.plotly_chart(interactive_fig_fn(), use_container_width=True)
     if caption:
         st.caption(caption)
+
+
+def generate_pdf_report(df_report_view: pd.DataFrame, artifacts: dict, filter_label: str) -> bytes:
+    """
+    Membuat laporan PDF ringkas (ringkasan model + distribusi cluster + tabel
+    hasil akhir) yang bisa diunduh langsung oleh mitra/pihak non-teknis,
+    tanpa perlu membuka aplikasi atau memahami detail teknis clustering.
+    Tabel hasil akhir mengikuti filter yang sedang aktif di halaman.
+    """
+    import io
+    from datetime import datetime
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    cfg = artifacts["feature_config"]
+    sil_km = st.session_state.silhouette_kmeans
+    sil_kmed = st.session_state.silhouette_kmedoids
+    best_method = "K-Means" if sil_km >= sil_kmed else "K-Medoids"
+
+    km_counts = pd.Series(st.session_state.kmeans_labels).value_counts().sort_index()
+    kmed_counts = pd.Series(st.session_state.kmedoids_labels).value_counts().sort_index()
+    all_clusters = sorted(set(km_counts.index) | set(kmed_counts.index))
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+        leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+        title="Laporan Hasil Clustering",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TitleCI", parent=styles["Title"], fontSize=16, textColor=colors.HexColor("#172554"))
+    heading_style = ParagraphStyle("HeadingCI", parent=styles["Heading2"], fontSize=12, textColor=colors.HexColor("#1E3A8A"), spaceBefore=14, spaceAfter=6)
+    normal_style = ParagraphStyle("NormalCI", parent=styles["Normal"], fontSize=9, leading=12)
+    small_style = ParagraphStyle("SmallCI", parent=styles["Normal"], fontSize=8, leading=10)
+
+    story = []
+    story.append(Paragraph("Laporan Hasil Clustering", title_style))
+    story.append(Paragraph("Data Penerima Bantuan Sosial", normal_style))
+    story.append(Paragraph(f"Dibuat pada: {datetime.now().strftime('%d %B %Y, %H:%M')}", small_style))
+    story.append(Spacer(1, 12))
+
+    # ------------------------------------------------------------
+    # RINGKASAN
+    # ------------------------------------------------------------
+    story.append(Paragraph("Ringkasan", heading_style))
+    ringkasan_data = [
+        ["Jumlah Data", f"{len(st.session_state.df_raw):,} penerima manfaat"],
+        ["Jumlah Fitur", f"{len(cfg['feature_order'])} indikator kerentanan"],
+        ["Jumlah Cluster", f"{cfg['k']}"],
+        ["Silhouette Score K-Means", f"{sil_km:.4f}"],
+        ["Silhouette Score K-Medoids", f"{sil_kmed:.4f}"],
+        ["Metode Terbaik", f"{best_method} (skor tertinggi)"],
+    ]
+    t_ringkasan = Table(ringkasan_data, colWidths=[6.5 * cm, 9.5 * cm])
+    t_ringkasan.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#1E3A8A")),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.5, colors.HexColor("#E2E8F0")),
+    ]))
+    story.append(t_ringkasan)
+    story.append(Spacer(1, 10))
+
+    # ------------------------------------------------------------
+    # DISTRIBUSI ANGGOTA PER CLUSTER
+    # ------------------------------------------------------------
+    story.append(Paragraph("Distribusi Anggota per Cluster", heading_style))
+    dist_header = ["Cluster", "K-Means (jumlah)", "K-Medoids (jumlah)"]
+    dist_rows = [
+        [f"Cluster {c}", str(km_counts.get(c, 0)), str(kmed_counts.get(c, 0))]
+        for c in all_clusters
+    ]
+    t_dist = Table([dist_header] + dist_rows, colWidths=[5 * cm, 5.5 * cm, 5.5 * cm])
+    t_dist.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+    ]))
+    story.append(t_dist)
+    story.append(Spacer(1, 10))
+
+    # ------------------------------------------------------------
+    # TABEL HASIL AKHIR (mengikuti filter yang sedang aktif di halaman)
+    # ------------------------------------------------------------
+    story.append(Paragraph("Tabel Hasil Akhir Pengelompokan", heading_style))
+    story.append(Paragraph(
+        f"Filter aktif: <b>{filter_label}</b> — {len(df_report_view)} baris ditampilkan.",
+        small_style,
+    ))
+    story.append(Spacer(1, 6))
+
+    table_header = list(df_report_view.columns)
+    table_rows = [
+        [Paragraph(str(v), small_style) for v in row]
+        for row in df_report_view.itertuples(index=False, name=None)
+    ]
+    col_count = len(table_header)
+    name_col_width = 7 * cm
+    other_col_width = (17 * cm - name_col_width) / max(col_count - 1, 1)
+    col_widths = [name_col_width] + [other_col_width] * (col_count - 1)
+
+    t_hasil = Table(
+        [[Paragraph(f"<b>{h}</b>", small_style) for h in table_header]] + table_rows,
+        colWidths=col_widths, repeatRows=1,
+    )
+    t_hasil.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#E2E8F0")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    story.append(t_hasil)
+
+    story.append(Spacer(1, 14))
+    story.append(Paragraph(
+        "Laporan ini dihasilkan secara otomatis oleh sistem ClusterInsight berdasarkan hasil "
+        "pengelompokan (clustering) K-Means dan K-Medoids terhadap data penerima bantuan.",
+        small_style,
+    ))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
