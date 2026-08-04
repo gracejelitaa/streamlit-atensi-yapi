@@ -448,35 +448,6 @@ def show_model_visual(artifacts, image_key, caption, interactive_fig_fn):
         st.caption(caption)
 
 
-def compute_vulnerability_labels(cluster_labels, df_scaled: pd.DataFrame, feature_cols: list) -> dict:
-    """
-    Menghitung label kualitatif tingkat kerentanan untuk tiap cluster berdasarkan
-    rata-rata nilai fitur yang sudah dinormalisasi (df_scaled). Cluster dengan skor
-    komposit tertinggi (rata-rata seluruh fitur) dianggap paling rentan.
-
-    Asumsi: mayoritas fitur di-encode agar nilai lebih besar = kondisi lebih rentan
-    (mis. Status Orang Tua, Kondisi Tempat Tinggal/Bangunan/Atap/Lantai, Sumber Air,
-    Jumlah Tanggungan). Dua kolom numerik lain (Sumber Penerangan, Pengeluaran
-    Perbulan) ikut dihitung apa adanya karena arah kerentanannya tidak eksplisit.
-
-    Return: dict {cluster_id (int): label (str)}
-    """
-    df_tmp = df_scaled[feature_cols].copy()
-    df_tmp["_cluster"] = np.asarray(cluster_labels)
-    composite_score = df_tmp.groupby("_cluster")[feature_cols].mean().mean(axis=1)
-    ordered = composite_score.sort_values(ascending=False)  # skor tertinggi = paling rentan
-
-    label_pool = ["Sangat Rentan", "Cukup Rentan", "Tidak Rentan"]
-    labels_map = {}
-    n = len(ordered)
-    for i, cluster_id in enumerate(ordered.index):
-        if n <= len(label_pool):
-            labels_map[int(cluster_id)] = label_pool[i]
-        else:
-            labels_map[int(cluster_id)] = f"Kelompok Rentan #{i + 1}"
-    return labels_map
-
-
 def generate_pdf_report(df_report_view: pd.DataFrame, artifacts: dict, filter_label: str) -> bytes:
     """
     Membuat laporan PDF ringkas (ringkasan model + distribusi cluster + tabel
@@ -485,7 +456,6 @@ def generate_pdf_report(df_report_view: pd.DataFrame, artifacts: dict, filter_la
     Tabel hasil akhir mengikuti filter yang sedang aktif di halaman.
     """
     import io
-    import re
     from datetime import datetime
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
@@ -501,14 +471,6 @@ def generate_pdf_report(df_report_view: pd.DataFrame, artifacts: dict, filter_la
     km_counts = pd.Series(st.session_state.kmeans_labels).value_counts().sort_index()
     kmed_counts = pd.Series(st.session_state.kmedoids_labels).value_counts().sort_index()
     all_clusters = sorted(set(km_counts.index) | set(kmed_counts.index))
-
-    # Label kualitatif tingkat kerentanan per cluster (khusus untuk PDF)
-    km_vuln_labels = compute_vulnerability_labels(
-        st.session_state.kmeans_labels, st.session_state.df_scaled, cfg["feature_order"]
-    )
-    kmed_vuln_labels = compute_vulnerability_labels(
-        st.session_state.kmedoids_labels, st.session_state.df_scaled, cfg["feature_order"]
-    )
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -558,29 +520,18 @@ def generate_pdf_report(df_report_view: pd.DataFrame, artifacts: dict, filter_la
     # DISTRIBUSI ANGGOTA PER CLUSTER
     # ------------------------------------------------------------
     story.append(Paragraph("Distribusi Anggota per Cluster", heading_style))
-    story.append(Paragraph(
-        "Label kualitatif dihitung otomatis berdasarkan rata-rata karakteristik anggota "
-        "tiap cluster — semakin tinggi skor komposit fitur, semakin rentan kelompoknya.",
-        small_style,
-    ))
-    story.append(Spacer(1, 4))
-    dist_header = ["Cluster", "Label K-Means", "Jml.", "Label K-Medoids", "Jml."]
+    dist_header = ["Cluster", "K-Means (jumlah)", "K-Medoids (jumlah)"]
     dist_rows = [
-        [
-            f"Cluster {c}",
-            km_vuln_labels.get(c, "-"), str(km_counts.get(c, 0)),
-            kmed_vuln_labels.get(c, "-"), str(kmed_counts.get(c, 0)),
-        ]
+        [f"Cluster {c}", str(km_counts.get(c, 0)), str(kmed_counts.get(c, 0))]
         for c in all_clusters
     ]
-    t_dist = Table([dist_header] + dist_rows, colWidths=[2.5 * cm, 4.5 * cm, 1.5 * cm, 4.5 * cm, 1.5 * cm])
+    t_dist = Table([dist_header] + dist_rows, colWidths=[5 * cm, 5.5 * cm, 5.5 * cm])
     t_dist.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("ALIGN", (2, 0), (2, -1), "CENTER"),
-        ("ALIGN", (4, 0), (4, -1), "CENTER"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
     ]))
@@ -597,30 +548,13 @@ def generate_pdf_report(df_report_view: pd.DataFrame, artifacts: dict, filter_la
     ))
     story.append(Spacer(1, 6))
 
-    # Sisipkan label kualitatif di belakang teks "Cluster N" agar mudah dibaca mitra
-    def _with_vuln_label(value, vuln_map):
-        match = re.search(r"Cluster\s+(\d+)", str(value))
-        if match:
-            cluster_id = int(match.group(1))
-            label = vuln_map.get(cluster_id)
-            if label:
-                return f"{value} – {label}"
-        return value
-
-    df_pdf_table = df_report_view.copy()
-    for col in df_pdf_table.columns:
-        if "K-Means" in col:
-            df_pdf_table[col] = df_pdf_table[col].apply(lambda v: _with_vuln_label(v, km_vuln_labels))
-        elif "K-Medoids" in col:
-            df_pdf_table[col] = df_pdf_table[col].apply(lambda v: _with_vuln_label(v, kmed_vuln_labels))
-
-    table_header = list(df_pdf_table.columns)
+    table_header = list(df_report_view.columns)
     table_rows = [
         [Paragraph(str(v), small_style) for v in row]
-        for row in df_pdf_table.itertuples(index=False, name=None)
+        for row in df_report_view.itertuples(index=False, name=None)
     ]
     col_count = len(table_header)
-    name_col_width = 5.5 * cm
+    name_col_width = 7 * cm
     other_col_width = (17 * cm - name_col_width) / max(col_count - 1, 1)
     col_widths = [name_col_width] + [other_col_width] * (col_count - 1)
 
